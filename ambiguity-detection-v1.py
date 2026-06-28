@@ -106,21 +106,14 @@ similarity = ctrl.Antecedent(np.arange(0, 1.1, 0.01), 'similarity')
 ambiguity  = ctrl.Consequent(np.arange(0, 1.1, 0.01), 'ambiguity')
 
 # Similarity input membership functions — unchanged, these were correct
-similarity['low']    = fuzz.trapmf(similarity.universe, [0, 0, 0.2, 0.4])
-similarity['medium'] = fuzz.trimf(similarity.universe,  [0.3, 0.5, 0.7])
-similarity['high']   = fuzz.trapmf(similarity.universe, [0.6, 0.8, 1, 1])
+ambiguity['low']    = fuzz.trapmf(ambiguity.universe, [0,   0,   0.2, 0.4])
+ambiguity['medium'] = fuzz.trimf( ambiguity.universe, [0.3, 0.5, 0.7])
+ambiguity['high']   = fuzz.trapmf(ambiguity.universe, [0.6, 0.8, 1,   1  ])
 
-# FIX: ambiguity output membership functions were swapped.
-# 'low'  ambiguity must sit at LOW output values  (0.0 – 0.5)
-# 'high' ambiguity must sit at HIGH output values (0.5 – 1.0)
-# Previously 'low' was at [0.5, 0.7, 1, 1] and 'high' was at [0, 0, 0.3, 0.5] — inverted.
-ambiguity['low']  = fuzz.trapmf(ambiguity.universe, [0, 0, 0.3, 0.5])
-ambiguity['high'] = fuzz.trapmf(ambiguity.universe, [0.5, 0.7, 1, 1])
-
-# Rules: logic is correct — low similarity → low ambiguity; medium/high → high ambiguity
+# Corrected rules — semantically consistent
 rules = [
     ctrl.Rule(similarity['low'],    ambiguity['low']),
-    ctrl.Rule(similarity['medium'], ambiguity['high']),
+    ctrl.Rule(similarity['medium'], ambiguity['medium']),
     ctrl.Rule(similarity['high'],   ambiguity['high']),
 ]
 fz_ctrl   = ctrl.ControlSystem(rules)
