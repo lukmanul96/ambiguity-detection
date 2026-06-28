@@ -67,7 +67,8 @@ ambiguous_terms = get_ambiguous_terms()
 # ---------- UI Configuration ----------
 st.sidebar.header("🔧 Tuning Parameters")
 st.sidebar.slider("TF-IDF Similarity Threshold", 0.0, 1.0, 0.04, 0.01, key="threshold_slider")
-st.sidebar.slider("Fuzzy Score Threshold (lower = more ambiguous)", 0.0, 1.0, 0.01, 0.01, key="fuzzy_slider")
+# FIX: default raised to 0.5 so the fuzzy condition fires meaningfully
+st.sidebar.slider("Fuzzy Score Threshold (higher = more ambiguous)", 0.0, 1.0, 0.5, 0.01, key="fuzzy_slider")
 threshold = st.session_state["threshold_slider"]
 fuzzy_threshold = st.session_state["fuzzy_slider"]
 
@@ -102,23 +103,34 @@ def detect_pos_based_ambiguity(text):
 
 # ---------- Fuzzy Setup ----------
 similarity = ctrl.Antecedent(np.arange(0, 1.1, 0.01), 'similarity')
-ambiguity = ctrl.Consequent(np.arange(0, 1.1, 0.01), 'ambiguity')
-similarity['low'] = fuzz.trapmf(similarity.universe, [0, 0, 0.2, 0.4])
-similarity['medium'] = fuzz.trimf(similarity.universe, [0.3, 0.5, 0.7])
-similarity['high'] = fuzz.trapmf(similarity.universe, [0.6, 0.8, 1, 1])
-ambiguity['low'] = fuzz.trapmf(ambiguity.universe, [0.5, 0.7, 1, 1])
-ambiguity['high'] = fuzz.trapmf(ambiguity.universe, [0, 0, 0.3, 0.5])
-rules = [ctrl.Rule(similarity['low'], ambiguity['high']),
-         ctrl.Rule(similarity['medium'], ambiguity['high']),
-         ctrl.Rule(similarity['high'], ambiguity['low'])]
-fz_ctrl = ctrl.ControlSystem(rules)
+ambiguity  = ctrl.Consequent(np.arange(0, 1.1, 0.01), 'ambiguity')
+
+# Similarity input membership functions — unchanged, these were correct
+similarity['low']    = fuzz.trapmf(similarity.universe, [0, 0, 0.2, 0.4])
+similarity['medium'] = fuzz.trimf(similarity.universe,  [0.3, 0.5, 0.7])
+similarity['high']   = fuzz.trapmf(similarity.universe, [0.6, 0.8, 1, 1])
+
+# FIX: ambiguity output membership functions were swapped.
+# 'low'  ambiguity must sit at LOW output values  (0.0 – 0.5)
+# 'high' ambiguity must sit at HIGH output values (0.5 – 1.0)
+# Previously 'low' was at [0.5, 0.7, 1, 1] and 'high' was at [0, 0, 0.3, 0.5] — inverted.
+ambiguity['low']  = fuzz.trapmf(ambiguity.universe, [0, 0, 0.3, 0.5])
+ambiguity['high'] = fuzz.trapmf(ambiguity.universe, [0.5, 0.7, 1, 1])
+
+# Rules: logic is correct — low similarity → low ambiguity; medium/high → high ambiguity
+rules = [
+    ctrl.Rule(similarity['low'],    ambiguity['low']),
+    ctrl.Rule(similarity['medium'], ambiguity['high']),
+    ctrl.Rule(similarity['high'],   ambiguity['high']),
+]
+fz_ctrl   = ctrl.ControlSystem(rules)
 simulator = ctrl.ControlSystemSimulation(fz_ctrl)
 
 # ---------- Main Analysis ----------
 def detect_structural_ambiguity(text):
     doc = nlp(text)
-    verbs = [tok for tok in doc if tok.pos_ == "VERB"]
-    cconjs = [tok for tok in doc if tok.pos_ == "CCONJ"]
+    verbs      = [tok for tok in doc if tok.pos_ == "VERB"]
+    cconjs     = [tok for tok in doc if tok.pos_ == "CCONJ"]
     adjectives = [tok for tok in doc if tok.pos_ == "ADJ"]
     return {
         "multi_verbs_and": len(verbs) >= 2 and any(tok.text.lower() == "and" for tok in doc),
@@ -127,20 +139,24 @@ def detect_structural_ambiguity(text):
     }
 
 def analyze(requirements, ambiguous_terms):
-    results = []
+    results   = []
     all_texts = [r['text_body'].lower() for r in requirements] + ambiguous_terms
-    vec = TfidfVectorizer().fit_transform(all_texts)
-    req_vecs = vec[:len(requirements)]
-    amb_vecs = vec[len(requirements):]
+    vec       = TfidfVectorizer().fit_transform(all_texts)
+    req_vecs  = vec[:len(requirements)]
+    amb_vecs  = vec[len(requirements):]
+
     for i, req in enumerate(requirements):
         sim_scores = cosine_similarity(req_vecs[i], amb_vecs).flatten()
-        max_score = max(sim_scores)
+        max_score  = max(sim_scores)
+
         simulator.input['similarity'] = max_score
         simulator.compute()
         fuzzy_score = simulator.output['ambiguity']
-        heuristics = apply_heuristic_rules(req['text_body'])
-        pos_flags = detect_pos_based_ambiguity(req['text_body'])
+
+        heuristics       = apply_heuristic_rules(req['text_body'])
+        pos_flags        = detect_pos_based_ambiguity(req['text_body'])
         structural_flags = detect_structural_ambiguity(req['text_body'])
+
         results.append({
             "ID": req['id'],
             "Requirement Text": req['text_body'],
@@ -149,7 +165,14 @@ def analyze(requirements, ambiguous_terms):
             "Heuristic Types": heuristics,
             "POS Flags": pos_flags,
             "Structural Flags": structural_flags,
-            "Is Ambiguous": max_score > threshold or fuzzy_score < fuzzy_threshold or bool(heuristics) or any(pos_flags.values())
+            # FIX: fuzzy condition changed from < to > so that a HIGH fuzzy_score
+            # (meaning high ambiguity) correctly triggers the flag.
+            "Is Ambiguous": (
+                max_score > threshold
+                or fuzzy_score > fuzzy_threshold
+                or bool(heuristics)
+                or any(pos_flags.values())
+            )
         })
     return pd.DataFrame(results)
 
@@ -203,22 +226,18 @@ if requirements:
     st.subheader("📝 User Feedback on Ambiguity Results")
     st.write("Review each requirement and update the ambiguity label if needed.")
 
-    # Feedback session state to persist user choices
     if "user_feedback" not in st.session_state:
         st.session_state["user_feedback"] = ["Ambiguous" if val else "Not Ambiguous" for val in df_results["Is Ambiguous"]]
 
     feedback_list = []
     for idx, row in df_results.iterrows():
-        default_val = "Ambiguous" if row["Is Ambiguous"] else "Not Ambiguous"
         user_choice = st.selectbox(
-            f"Requirement ID {row['ID']} ({row['Requirement Text'][:45]}...)", 
-            ["Ambiguous", "Not Ambiguous"], 
-            index=0 if st.session_state["user_feedback"][idx] == "Ambiguous" else 1, 
+            f"Requirement ID {row['ID']} ({row['Requirement Text'][:45]}...)",
+            ["Ambiguous", "Not Ambiguous"],
+            index=0 if st.session_state["user_feedback"][idx] == "Ambiguous" else 1,
             key=f"feedback_{idx}"
         )
         feedback_list.append(user_choice)
-    # Override ambiguity if user marked it as Not Ambiguous
-        
 
     if st.button("Save Feedback"):
         df_results["Is Ambiguous"] = [
@@ -229,7 +248,6 @@ if requirements:
         df_results["User Feedback"] = feedback_list
         st.success("User feedback has been saved! You can now reanalyze the results.")
 
-        # Save feedback as downloadable file
         with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
             df_results.to_csv(tmp.name, index=False)
             st.download_button("📥 Download Feedback CSV", data=open(tmp.name, "rb").read(), file_name="user_feedback.csv")
@@ -238,15 +256,12 @@ if requirements:
     if "User Feedback" in df_results.columns:
         st.subheader("🔁 Reanalyze Requirements Based on Feedback")
         if st.button("Reanalyze with User Feedback"):
-            # Add ambiguous requirements (based on feedback) to ambiguous_terms for learning
             updated_ambiguous_terms = ambiguous_terms.copy()
             for i, row in df_results.iterrows():
                 if row["User Feedback"] == "Ambiguous":
                     updated_ambiguous_terms.append(row["Requirement Text"].lower())
-            # Reanalyze and display
             updated_df = analyze(requirements, updated_ambiguous_terms)
-            df_results = updated_df
-
+            df_results  = updated_df
 
             updated_df["Is Ambiguous"] = [
                 False if feedback == "Not Ambiguous" else True
@@ -258,9 +273,8 @@ if requirements:
                 st.markdown(f"**Requirement ID {row['ID']}**: {row['Requirement Text']}")
                 st.checkbox("Is Ambiguous", value=row["Is Ambiguous"], key=f"updated_checkbox_{idx}", disabled=True)
 
-            # Compare ambiguity status before and after
             updated_df["Was Ambiguous Before"] = df_results["Is Ambiguous"]
-            updated_df["Is Ambiguous Now"] = updated_df["Is Ambiguous"]
+            updated_df["Is Ambiguous Now"]     = updated_df["Is Ambiguous"]
             st.dataframe(updated_df[["ID", "Requirement Text", "Was Ambiguous Before", "Is Ambiguous Now"]])
 
             st.success("System has reanalyzed the requirements with your feedback.")
@@ -291,18 +305,18 @@ if uploaded_labeled_test:
         accuracy = accuracy_score(y_true, y_pred)
         st.markdown(f"### ✅ Custom System Accuracy: `{accuracy:.2f}`")
         report = classification_report(y_true, y_pred, output_dict=True)
-        st.subheader("📋 Classification Report ")
+        st.subheader("📋 Classification Report")
         st.dataframe(pd.DataFrame(report).transpose())
-        labels = [0, 1]
+        labels      = [0, 1]
         label_names = ["Not Ambiguous", "Ambiguous"]
-        precision = [report[str(label)]["precision"] for label in labels]
-        recall = [report[str(label)]["recall"] for label in labels]
-        f1 = [report[str(label)]["f1-score"] for label in labels]
+        precision   = [report[str(label)]["precision"] for label in labels]
+        recall      = [report[str(label)]["recall"]    for label in labels]
+        f1          = [report[str(label)]["f1-score"]  for label in labels]
         fig, ax = plt.subplots(figsize=(8, 6))
         x = range(len(label_names))
-        ax.bar(x, precision, width=0.2, label='Precision', align='center')
-        ax.bar([p + 0.2 for p in x], recall, width=0.2, label='Recall', align='center')
-        ax.bar([p + 0.4 for p in x], f1, width=0.2, label='F1 Score', align='center')
+        ax.bar(x,                    precision, width=0.2, label='Precision', align='center')
+        ax.bar([p + 0.2 for p in x], recall,   width=0.2, label='Recall',    align='center')
+        ax.bar([p + 0.4 for p in x], f1,        width=0.2, label='F1 Score',  align='center')
         ax.set_xticks([p + 0.2 for p in x])
         ax.set_xticklabels(label_names)
         ax.set_ylim([0, 1])
